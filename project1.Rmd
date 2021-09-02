@@ -2,7 +2,7 @@
 title: "CITS4009-Project 1"
 output:
   html_notebook: project1
-  html_document:
+  html_document: 
     df_print: paged
 ---
 #### Xiaoyu Yin (21982644)
@@ -26,6 +26,8 @@ library(Rcpp)
 library(ggridges)
 library(treemapify)
 library(magrittr)
+library(ggbeeswarm)
+library(vcd)
 ```
 
 ### Load the Data
@@ -61,7 +63,7 @@ Since most of variables are characters, I'll use this output and data dictionary
 
 ```{r selectcolumn,message=FALSE, warning=FALSE}
 # select the columns I want
-colselected <- c('SUBUNIT','ACCIDENT_DT','CAL_YR','CAL_QTR','ACCIDENT_TIME','DEGREE_INJURY','FIPS_STATE_CD','UG_LOCATION','UG_MINING_METHOD','SHIFT_BEGIN_TIME','MINE_EXPER','TOT_EXPER','JOB_EXPER','OCCUPATION','COAL_METAL_IND','DAYS_LOST','DAYS_RESTRICT','INJ_BODY_PART','SCHEDULE_CHARGE','TRANS_TERM','IMMED_NOTIFY' ,'NO_INJURIES','CLASSIFICATION','ACCIDENT_TYPE','MINING_EQUIP','EQUIP_MFR_NAME')
+colselected <- c('SUBUNIT','ACCIDENT_DT','CAL_YR','CAL_QTR','ACCIDENT_TIME','DEGREE_INJURY','FIPS_STATE_CD','UG_LOCATION','UG_MINING_METHOD','SHIFT_BEGIN_TIME','MINE_EXPER','TOT_EXPER','JOB_EXPER','OCCUPATION','COAL_METAL_IND','DAYS_LOST','DAYS_RESTRICT','INJ_BODY_PART','SCHEDULE_CHARGE','TRANS_TERM','IMMED_NOTIFY' ,'NO_INJURIES','CLASSIFICATION','ACCIDENT_TYPE','MINING_EQUIP','EQUIP_MFR_NAME','RETURN_TO_WORK_DT')
 
 # keep the original data, so we can always come back and re-modify.
 filtered <- main[,colselected]
@@ -113,11 +115,15 @@ Less than 100 of accidents that caused fatality/permanent injuries, so the numbe
 
 ### Change the columns to appropriate format
 ```{r changeDATATYPE, message=FALSE, warning=FALSE}
+filtered$COAL_METAL_IND[filtered$COAL_METAL_IND == 'C'] <- 'Coal'
+filtered$COAL_METAL_IND[filtered$COAL_METAL_IND == 'M'] <- 'Metal'
+
 # change data type
 filtered <- within(filtered, {
      COAL_METAL_IND   <- as.factor(COAL_METAL_IND)
      CAL_QTR          <- as.factor(CAL_QTR)
      ACCIDENT_DT      <- as.POSIXct(ACCIDENT_DT, format="%d/%m/%Y")
+     RETURN_TO_WORK_DT<- as.POSIXct(RETURN_TO_WORK_DT, format="%d/%m/%Y")
 })
 ```
 
@@ -262,13 +268,13 @@ n1 <- rbind(s,n,o,f,c,cc,acc,caust,flash)
 n2 <- setdiff(filtered,n1)
 
 # change the level
-s$ACCIDENT_TYPE_NEW <- "STRUCK"
-n$ACCIDENT_TYPE_NEW <- "NOT AVAILABLE"
-o$ACCIDENT_TYPE_NEW <-"OVEREXT"
-f$ACCIDENT_TYPE_NEW <-"FALL"
-c$ACCIDENT_TYPE_NEW <-"CONTACT"
-cc$ACCIDENT_TYPE_NEW <-"CGHT"
-acc$ACCIDENT_TYPE_NEW <-"NO INJURIES"
+s$ACCIDENT_TYPE_NEW     <- "STRUCK"
+n$ACCIDENT_TYPE_NEW     <- "NOT AVAILABLE"
+o$ACCIDENT_TYPE_NEW     <-"OVEREXT"
+f$ACCIDENT_TYPE_NEW     <-"FALL"
+c$ACCIDENT_TYPE_NEW     <-"CONTACT"
+cc$ACCIDENT_TYPE_NEW    <-"CGHT"
+acc$ACCIDENT_TYPE_NEW   <-"NO INJURIES"
 caust$ACCIDENT_TYPE_NEW <-"TXC & NOX"
 flash$ACCIDENT_TYPE_NEW <- "FLASH"
 
@@ -475,27 +481,22 @@ p9 <- ggplot(data = filtered, aes(x=CAL_QTR)) +
       geom_bar(colour="black", fill="steelblue") +
       labs(title = "Accident by Quarter", x="Quarter" ,y= "Frequency")
 
-p10 <- ggplot(data = filtered, aes(x=MONTH)) + 
+p10 <- ggplot(data = filtered, aes(x=WKDAY)) + 
        geom_bar(colour="black", fill="steelblue") +
-       labs(title = "Accident by Month", x="Month" ,y= "Frequency")
+       labs(title = "Accident by Week", x="Week" ,y= "Frequency")
 
-p11 <- ggplot(data = filtered, aes(x=WKDAY)) + 
-       geom_bar(colour="black", fill="steelblue") +
-       labs(title = "Accident by Week", x="Day" ,y= "Frequency")
+p11 <- ggplot(data = filtered, aes(x=ACCIDENT_TIME_NEW)) + 
+       geom_histogram(colour="Black", fill="steelblue", binwidth = 1) +
+       labs(title = "Accident by Time", x= "Time (hour)", y = "Frequency")
 
 grid.arrange(p8, p9, p10 , p11, ncol=2, nrow=2)
 
 ```
 We can the the number of injuries gradually decreases over the years. Decreased approximately from 180 in 2000  to 20 in 2015. Accidents mostly happened during weekdays, maybe this due to number of shifts during weekdays and weekends. 
 
-```{r message=FALSE, warning=FALSE}
-ggplot(data = filtered, aes(x=ACCIDENT_TIME_NEW)) + 
-    geom_histogram(colour="Black", fill="steelblue", binwidth = 1) +
-    labs(title = "Accident by Time", x= "Time (hour)", y = "Frequency")
-```
 Most accidents happened between 7am to 4pm. 
 
-Let's look the shift time to see if more shifts are during the day. The compare the distribution between shift and accident time, I'll use two density plots here. 
+Let's look the shift time to see if more shifts are during the day. The compare the distribution between shift and accident time at differnet time point, I'll use two density plots here. 
 ```{r message=FALSE, warning=FALSE}
 ggplot(filtered) + 
   geom_density(aes(x=ACCIDENT_TIME_NEW), fill="red", alpha=0.5) +
@@ -516,7 +517,7 @@ ggplot(tmp,
        aes(x = ACCIDENT_TYPE_NEW, 
            fill = DAY_NIGHT)) + 
   geom_bar(position = "fill")+
-  labs(x="Accident type", y= "Density", title =  "Accidents during the day")+
+  labs(x="Accident type", y= "Density", title =  "Accidents during the day", fill = "Time")+
   coord_flip()
 
 # proportion of accidents in day time
@@ -530,10 +531,9 @@ yearacci <- filtered %>% group_by(YEAR, ACCIDENT_TYPE_NEW) %>% summarise(Frequen
 ggplot(data = yearacci, mapping = aes(x = YEAR, y = Frequency, color = ACCIDENT_TYPE_NEW)) +
   geom_point() +
   geom_line() +
-  labs(title="Number of Accidents by Year", x= "Year")
+  labs(title="Number of Accidents by Year", x= "Year", color = "Accident type")
 ```
-We can the number of accidents that caused by over exertion and struck declines over the year.Since those two are the most common types of accident, that's probably one of the reasons for the decreasing of accidents over the year.
-
+We can see the number of accidents that caused by over exertion and struck decline over the year.Since those two are the most common types of accident, that's probably one of the reasons for the decrease in the number of accidents over the year.
 
 ```{r}
 yearsub <- filtered %>% group_by(YEAR, SUBUNIT) %>% summarise(Frequency = n())
@@ -544,7 +544,17 @@ ggplot(data = yearsub, mapping = aes(x = YEAR, y = Frequency, color = SUBUNIT)) 
   labs(title="Number of Accidents by Year", x= "Year")
 
 ```
-Also, the number of accidents occurs at underground, strip,quary, open pit and plant decreases significantly. And this confirm with findings from the heat map plotted previously. Most accidents occurred at underground, plant and strip,quary, open pit that are caused by struck and over exertion. 
+Also, the number of accidents occurs at underground, strip,quary, open pit and plant decreases significantly. And this in match with findings from the heat map plotted previously. Most accidents occurred at underground, plant and strip,quary, open pit that are caused by struck and over exertion. 
+
+#### Return to work
+```{r message=FALSE, warning=FALSE}
+filtered$DAY_AWY <- difftime(filtered$RETURN_TO_WORK_DT,filtered$ACCIDENT_DT, units="days")
+filtered$DAY_AWY <- as.numeric(filtered$DAY_AWY)
+describe(filtered$DAY_AWY)
+nona <- na.omit(filtered$DAY_AWY) 
+length(nona[nona < 0])
+```
+Interestingly,there are some negative days when we calculate the days between accidents date happened and the date return to work. Clearly, there is a problem with the format of the date.The most likely reason would be they switched between month/day/yr to day/month/yr format either in the accidents date or the return to work date. And the DAY_AWY column doesn't really match with DAY_LOST column. 
 
 ## Analyzing Body Part
 Two much categories in the body part variable, to make graphs more clear, we need to regroup them first.
@@ -573,7 +583,7 @@ filtered$INJ_BODY_PART[which(filtered$INJ_BODY_PART %in% NOT_AVAILABLE)] <- 'NOT
 filtered$INJ_BODY_PART <- factor(filtered$INJ_BODY_PART, levels=names(sort(table(filtered$INJ_BODY_PART), decreasing=FALSE)))
 
 ggplot(filtered, aes(x=INJ_BODY_PART)) + 
-     geom_bar(fill = "steelblue2")     +
+     geom_bar(fill = "steelblue")     +
      labs(title = 'Injury Body Part', x = 'Body Part', y = 'Frequency') +
      coord_flip()
 ```
@@ -593,13 +603,12 @@ Surprisingly, head is associated with quite a few no days lost or restrict. Arm,
 ```{r message=FALSE, warning=FALSE}
 fatal <- subset(filtered, SCHEDULE_CHARGE == 6000, select = c("DEGREE_INJURY","INJ_BODY_PART"))
 ggplot(fatal, aes(x=INJ_BODY_PART)) + 
-     geom_bar(fill = "steelblue2")     +
+     geom_bar(fill = "steelblue")   +
      labs(title = 'Injury Body Part', x = 'Body Part', y = 'Frequency')
 ```
 16/2000 death cases and are associated with injuries at head, body or multiple major part. 
 
 ```{r message=FALSE, warning=FALSE}
-
 counting3 <- count(filtered, ACCIDENT_TYPE_NEW, INJ_BODY_PART)
 
 lbls <- paste0(c("", "\n"), 
@@ -608,16 +617,112 @@ lbls <- paste0(c("", "\n"),
 ggplot (data = counting3, mapping =aes(x=factor(INJ_BODY_PART, labels=lbls), y= ACCIDENT_TYPE_NEW)) +
   geom_tile(mapping = aes(fill=n))+
   labs(x= 'Body Part', y= 'Accident type', title = 'Body Part by Accident type')
-
 ```
 Not available data in body part column are mainly because there is no injuries. injuries on arm, Head and leg are mainly caused by struck. While over exertion is the main cause for back injuries. Injuries at body are seems like more evenly distributed among the accident type.
 
+### Number of injuries
+```{r}
+describe(filtered$NO_INJURIES)
+```
+```{r message=FALSE, warning=FALSE}
+ggplot(filtered, aes(x = NO_INJURIES)) +
+  geom_histogram(fill = "steelblue", 
+                 color = "white",
+                 binwidth = 1) + 
+      labs(title="Number of Injuries", 
+      subtitle = "binwidth = 1 case",
+      x = "Injuries")
+```
+Most accidents caused 1 injury. From the statistics, we can see the max for NO_INJURIES is 16 which is not shown on the graph, this is probably because of the high scale of y axis. Let's exclude 0 and 1 from NO_INJURIES column and have a look other numbers. 
+
+Since it's a very small subset of data, it's appropriate to use a dot plot here with each dot representing one observation.
+```{r message=FALSE, warning=FALSE}
+tmp <- filtered[filtered$NO_INJURIES >1,]
+ggplot(tmp, aes(x = NO_INJURIES)) +
+  geom_dotplot() + 
+      labs(title="Number of Injuries",
+      x = "Count")
+```
+15 accidents caused 2 injuries, 2 accidents caused 16 and 2 injuries. 
+Let's look where those accidents occurred and what type of accidents are associated with those cases. To prevent any overprinting of points, we'll use jitters here.
+```{r message=FALSE, warning=FALSE}
+ggplot(tmp, 
+       aes(y = ACCIDENT_TYPE_NEW, 
+           x = NO_INJURIES,
+           color = ACCIDENT_TYPE_NEW,
+           shape = SUBUNIT)) +
+   geom_jitter() +
+  labs(title = "Accidents by number of injuries", y="", x="No Injuries",color = "Accident type", shape= "Location" )
+```
+10 cases caused more than 1 injury are happened at underground and the two accidents with 16 injuries are caused by struck and occurred at underground. 
+
 ### Schedule Charge
 ```{r message=FALSE, warning=FALSE}
-
-
+tmp <- filtered[filtered$SCHEDULE_CHARGE_NEW > 0,]
+ggplot(tmp, 
+       aes(x = ACCIDENT_TYPE_NEW,
+           y = SCHEDULE_CHARGE_NEW,
+           color = ACCIDENT_TYPE_NEW)) +
+  geom_quasirandom(alpha = 0.7,
+                   size = 1.5) + 
+  labs(title = "Days lost for permanent injuries", x ="Accident type", y= "Days lost",color = "Accident type")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
+We can see permanent injuries are mostly found in CGHT over exertion group, and struck.
 
+### Coal/Metal
+Segmented bar plot to look the proportion of 
+```{r message=FALSE, warning=FALSE}
+atmine <- filtered %>%
+  group_by(ACCIDENT_TYPE_NEW,COAL_METAL_IND) %>%
+  summarize(n = n()) %>% 
+  mutate(pct = n/sum(n),
+         lbl = scales::percent(pct))
+
+ggplot(atmine, 
+       aes(x = ACCIDENT_TYPE_NEW, y= pct,
+           fill = COAL_METAL_IND)) + 
+  geom_bar(stat = "identity", position = "fill") +
+  geom_text(aes(label = lbl), 
+            size = 3, 
+            position = position_stack(vjust = 0.5)) +
+  scale_fill_brewer(palette = "Set2") +
+  scale_y_continuous(breaks = seq(0, 1, .2), 
+                     label = percent) +
+  labs(y = "Percent", x ="Accident type", fill = "Mine")+
+  coord_flip()
+```
+All groups except no injuries accidents, more accidents are found on metal mine as compared to coal mine. Let's look the percentage of coal vs metal mines.
+```{r message=FALSE, warning=FALSE}
+tmp <- filtered %>%
+  group_by(COAL_METAL_IND) %>%
+  summarize(n = n())
+```
+Around 61% are metal mines and 39% are coal mines. Clearly, accidents at metal mines are more likely to causes injuries. 
+
+```{r message=FALSE, warning=FALSE}
+# some null value in the trans term, remove it first.
+tmp <- filtered[!(filtered$TRANS_TERM == ''),]
+#plotting
+ggplot(tmp, aes(x = MINE_EXPER_NEW)) +
+  geom_histogram(color = "white",
+                 fill = "steelblue",
+                 binwidth = 5) +
+  facet_grid(TRANS_TERM ~ COAL_METAL_IND) +
+  labs(title = "Mine experience by injury and mine",
+       x = "Experience(year)")
+```
+Terminated or transferred due to injuries or illness mostly within the 5 experience range for both coal and metal mine. Metal mines have more non-terminated/transferred cases than coal mine. But the general trend is same, accidents decrease with the increase in experience.
+
+### Activity 
+There are too much information in the activity column and it's hard to re-group them to make a clear and viewable graph, so a world cloud that indicates the frequency of words will be used here to give us a brief overview of the activities.  
+
+```{r message=FALSE, warning=FALSE}
+source('http://www.sthda.com/upload/rquery_wordcloud.r')
+des <- main$ACTIVITY
+res <- rquery.wordcloud(des, type ="text", lang = "english")
+```
+The most common words in the activity column are handling, tools, maintenance repair, operate, walking, running and operate and machine.
 
 ## State 
 Change state code to state name using the state-code file found on GitHub.
@@ -632,6 +737,7 @@ for(i in 1:length(filtered$FIPS_STATE_CD)){
 filtered$FIPS_STATE <- usstate_name
 ```
 
+Since there are too many states in the dataset,it's better to plot a map to view the number of accidents happened at each state.
 ```{r message=FALSE, warning=FALSE}
 state <- map_data('state')
 injury_state <- filtered %>%
@@ -667,4 +773,3 @@ ggplot(injury_usa) +
     map_theme
 ```
 Most of the accidents happened in Kentucky. There are number of states missing from the map, and this is because there is no data for those states.
-#dic <-  read.csv("data_dictionary.csv", sep = "|")
