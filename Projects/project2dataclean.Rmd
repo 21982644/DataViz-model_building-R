@@ -1,6 +1,7 @@
 ---
 title: "CITS4009-Project 2"
-output: prject2
+output: 
+    html_document
 ---
 #### Xiaoyu (21982644)
 
@@ -17,6 +18,7 @@ library(rpart)
 library(ggplot2)
 library(knitr)
 library(xgboost)
+library(reshape2)
 ```
 
 ### Load the Data
@@ -127,9 +129,12 @@ The split between day lost and no day lost is not 1:1 balanced but are very clos
 round(prop.table(table(training_prepared$DEGREE_INJURY_PRED)), 2)
 ```
 
+Convert indicator variables to factor.
 ```{r message=FALSE, warning=FALSE}
-for(d in names(training_prepared)) {
-      if(setequal(deframe(unique(training_prepared[,d])),c(0,1))) training_prepared[, d] <- as.factor(training_prepared[, d])
+indicator <- names(training_prepared)[grepl("isBAD",names(training_prepared))]
+
+for(d in indicator) {
+      training_prepared[, d] <- as.factor(training_prepared[, d])
 }
 ```
 
@@ -148,7 +153,7 @@ rgroup <- runif(nrow(training_prepared)) < 0.9
 dTrainAll <- training_prepared[rgroup,]
 dTest <- training_prepared[!rgroup,]
 
-outcomes <- c('DEGREE_INJURY_PRED','DEGREE_INJURY_CD')
+outcomes <- c('DEGREE_INJURY_PRED','DEGREE_INJURY_CD','DAY_AWY')
 
 vars <- setdiff(colnames(dTrainAll), outcomes)
 catVars <- vars[sapply(dTrainAll[, vars], class) %in% c('factor', 'character')]
@@ -218,10 +223,11 @@ for(v in catVars) {
 }
 ```
 
-#### Indicator
+From the output, we can see there are a few very impressing variables with high AUC such as injury body part, accident type and nature injury with AUC score over 0.8. 
+
+#### Filter out indicators.
 ```{r}
-indicator <- numericVars[grepl("isBAD", numericVars)]
-numericVars <- setdiff(numericVars,indicator)
+catVars <- setdiff(catVars,indicator)
 ```
 
 #### Numeric 
@@ -252,6 +258,7 @@ for(v in numericVars) {
   }
 }
 ```
+Variable DAY_AWY with AUC of 0.966, which is not shown here (same reason as days lost and days away variable). The best single numeric variable model is the Total experience variabe with calibration AUC score of 0.665.
 
 #### Calculate loglikelihood for feature selection
 ```{r}
@@ -368,26 +375,22 @@ performance <- function(model,dCal,cal_true,dTrain,train_true,predValue=TRUE,thr
   
   print(distribution(pred_value, as.factor(cal_true),modelname))
   
-  # precision <- (precObj@y.values)[[1]]
-  # prec.x <- (precObj@x.values)[[1]]
-  # recall <- (recObj@y.values)[[1]]
-  # 
-  # rocFrame <- data.frame(threshold=prec.x,
-  #                          precision=precision,
-  #                          recall=recall)
-  
   pnull      <- mean(cal_true==pos)
   callog     <- logLikelihood(cal_true, pred_value)
   nulllog    <- logLikelihood(cal_true, pnull)
   trainAUC   <- calcAUC(pred_train, train_true)
   calAUC     <- calcAUC(pred_value, cal_true)
-
+  
+  modelm <- matrix(c(nulllog,callog,trainAUC,calAUC), byrow=TRUE, nrow = 1)
+  colnames(modelm) <- c("null_log", "cal_log", "trainAUC","calAUC")
+  print(modelm)
+  
   trainperf_df <- performanceMeasures(train_true==pos, pred_train >= threshold, model.name="training",threshold)
   testperf_df <- performanceMeasures(cal_true==pos, pred_value >= threshold, model.name="calibration",threshold)
   train_df   <- trainperf_df[[2]]
   test_df <- testperf_df[[2]]
   perftable   <- rbind(train_df,test_df) 
-  print(kable(testperf_df[[1]]))
+  print(knitr::kable(testperf_df[[1]]))
   print(perftable)
   df <- data.frame(modelname,trainAUC,calAUC,callog)
   names(df) <- c("modelname","trainAUC", "calAUC", "logLikelihood")
@@ -398,7 +401,7 @@ performance <- function(model,dCal,cal_true,dTrain,train_true,predValue=TRUE,thr
 
 #### Decision Tree with all variables
 ```{r}
-formula <- paste(outcome,' ~ ', paste(c(catVars,numericVars), collapse=' + ', sep=''))
+formula <- paste(outcome,' ~ ', paste(vars, collapse=" + "), sep='')
 decision_tree_all <- rpart(formula, data=dTrain)
 ```
 
@@ -406,8 +409,21 @@ decision_tree_all <- rpart(formula, data=dTrain)
 performance(decision_tree_all,dCal,dCal[,outcome],dTrain,dTrain[,outcome],predValue=TRUE, modelname="Decision Tree (all)")
 ```
 
-#### Decision Tree with the selected variables
+This decision tree model that containing all variables selected including the indicator variables with a log likelihood of -7631.1 which is better than null model (-11762.61). The AUC score for training and calibration dataset doesn't vary a lot, the calibration AUC is 0.824 which is slightly better than train AUC, 0.822. Same for the precision, recall, fl and accuracy, those scores are very close between the training and calibration score. The ROC curve doesn't look very good (since the AUC is only 0.824) and we can see from the distribution plot that there is overlap between the positive(yes) and negative(no) for the probability that generated especially when x axis is around 0.3. Different threshold (0.5-0.9) were tested, but not much difference, so we'll just stick with 0.5 for this model. High accuracy is what we are aiming for, both false positive/false negative will need to some potential problems, for example cost for countermeasures and employees dissatisfaction. However, the accuracy for this model doesn't look very impressive and improvement is needed.
 
+#### Decision Tree without indicators
+```{r}
+formula <- paste(outcome,' ~ ', paste(c(catVars,numericVars), collapse=' + ', sep=''))
+decision_tree_wNind <- rpart(formula, data=dTrain)
+```
+
+```{r}
+performance(decision_tree_wNind,dCal,dCal[,outcome],dTrain,dTrain[,outcome],predValue=TRUE, modelname="Decision Tree (no_ind)")
+```
+
+This model excluded all the indicator variables and there is no differences between the model above. AUC, log likelihood, precision, recall, f1 and accuracy, everything is the same suggesting the indicator variables dont affect the performance of the decision tree model. 
+
+#### Decision Tree with the selected variables
 ```{r}
 formula <- paste(outcome,' ~ ', paste(selVars, collapse=' + '), sep='')
 decision_tree_sel <- rpart(formula, data=dTrain)
@@ -417,16 +433,19 @@ decision_tree_sel <- rpart(formula, data=dTrain)
 performance(decision_tree_sel,dCal,dCal[,outcome],dTrain,dTrain[,outcome],predValue=TRUE, modelname="Decision Tree (sel)")
 ```
 
+Surprisingly,the performance of decision tree with selected variables is exactly the same as the two models above. Again, this suggests that the numeric variables of the dataset which are not good predictors with no influences on the model.  
+
 #### Logistic Regression with all variables
 ```{r message=FALSE, warning=FALSE}
-dTrain$DEGREE_INJURY_PRED <- as.factor(dTrain$DEGREE_INJURY_PRED)
 formula <- paste(outcome, paste(c(catVars,numericVars), collapse=" + "), sep=" ~ ")
 logr_all <- glm(formula=formula, data=dTrain, family=binomial(link="logit"))
 ```
 
 ```{r message=FALSE, warning=FALSE}
-performance(logr_all,dCal,dCal[,outcome],dTrain,dTrain[,outcome],predValue=FALSE, modelname="LogisticR (all)")
+performance(logr_all,dCal,dCal[,outcome],dTrain,dTrain[,outcome],predValue=FALSE, threshold= 0.57, modelname="LogisticR (all)")
 ```
+
+This logistic regression model that containing all variables with a log likelihood of -6863.677 which is better than null model (-11762.61) and decision tree models (-7631.1). The AUC score for training and calibration dataset are 0.8899027, 0.8881454 respectively. Again, the AUC which is greater than decision tree models. The ROC curve looks better than the decision tree model as well and we can see from the distribution plot that there is more obvious cutoff between yes and no values and this is the threshold value that we picked for analysis. Also, the precision, recall, f1 and accuracy scores for calibration set which are slightly better than decision tree models.
 
 ```{r message=FALSE, warning=FALSE}
 formula <- paste(outcome, paste(selVars, collapse=" + "), sep=" ~ ")
@@ -434,11 +453,12 @@ logr_sel <- glm(formula=formula, data=dTrain, family=binomial(link="logit"))
 ```
 
 ```{r message=FALSE, warning=FALSE}
-performance(logr_sel,dCal,dCal[,outcome],dTrain,dTrain[,outcome],predValue=FALSE, modelname="LogisticR (sel)")
+performance(logr_sel,dCal,dCal[,outcome],dTrain,dTrain[,outcome],predValue=FALSE,threshold= 0.57, modelname="LogisticR (sel)")
 ```
 
-#### XGBoost
+Both the likelihood and AUC are slightly worse than the logistic regression with all variables, there is not much differences in other performance measures this further suggest the numeric variables that not not predictors. 
 
+#### XGBoost
 ```{r}
 tplan <- vtreat::designTreatmentsZ(dTrain, varlist, 
                                    minFraction= 0.025,
@@ -472,10 +492,25 @@ xgboost_model <- xgboost(data=trainVtreat,
                  verbose=FALSE)
 ```
 
-
 ```{r}
 performance(xgboost_model,calVtreat,dCal[,outcome],trainVtreat,dTrain[,outcome],predValue=FALSE, modelname="xgboost")
 ```
+
+This is the best classification model that we've built so far with AUC greater than 0.99 and log likelihood of -1675.306. The precision, recall, f1 and accuracy are 0.985,0.961,0.972 and 0.967, respectively. This is far better than the decision tree and logistic models.  
+
+#### Put all models together 
+```{r}
+df <- melt(modelMeasure[,names(modelMeasure) != "logLikelihood"],id.vars = "modelname" ,variable.name = 'measure')
+
+ggplot(df, aes(measure,value,group=modelname,colour=modelname)) + 
+  geom_point(size=1)+
+  geom_line()
+```
+
+Based on the performance measure, it is very clear that xgboost outperformed decision tree and logistic regression model. 
+
+### Evaluate xgboost model on the test set
+
 
 
 
