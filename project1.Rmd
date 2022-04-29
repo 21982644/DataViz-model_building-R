@@ -1,11 +1,10 @@
 ---
-title: "CITS4009-Project 1"
+title: "DataViz"
 output:
   html_document: 
     df_print: paged
-  html_notebook: project1
+  html_notebook: DataViz
 ---
-#### Xiaoyu Yin (21982644)
 
 ## Preparation and Overview
 
