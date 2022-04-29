@@ -1,0 +1,838 @@
+---
+title: "CITS4009-Project 2"
+output: 
+    html_document
+---
+#### Xiaoyu Yin (21982644)
+
+## Introduction
+The dataset used for this project is pretty much the same as for the dataset used for project 1 (EDA) except this dataset has more observations. This dataset contains collected information on the mining injuries at U.S from 2000 to 2015 with 57 features and over 200,000 observations.
+
+### Load Libraies
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(vtreat)
+library(ROCR)
+library(ROCit)
+library(rpart)
+library(ggplot2)
+library(knitr)
+library(xgboost)
+library(reshape2)
+library(Rcpp)
+library(cluster)
+```
+
+### Load the Data
+```{r}
+setwd("~/Downloads/CITS4009/Projects")
+main <- read.csv("us_data.csv")
+```
+
+### Data Pre-processing
+The data are cleaned as per project 1 with some modifications. Since we are already familiar with the data, the cleaning steps and explanation are not shown in full details. The cleaned data will be used for both classification and clustering.
+```{r}
+# select columns
+keep <- c("SUBUNIT","ACCIDENT_DT","CAL_YR","CAL_QTR","ACCIDENT_TIME", "DEGREE_INJURY_CD", 'DEGREE_INJURY',"FIPS_STATE_CD", "UG_LOCATION", "UG_MINING_METHOD", "MINING_EQUIP", "SHIFT_BEGIN_TIME", "CLASSIFICATION", "ACCIDENT_TYPE", "NO_INJURIES", "TOT_EXPER", "MINE_EXPER","JOB_EXPER", "ACTIVITY","INJURY_SOURCE","NATURE_INJURY", "INJ_BODY_PART", "TRANS_TERM", "RETURN_TO_WORK_DT", "IMMED_NOTIFY","COAL_METAL_IND","DAYS_LOST","DAYS_RESTRICT", "SCHEDULE_CHARGE",'OCCUPATION')
+
+injury <- main[which(names(main) %in% keep)]
+```
+
+```{r}
+injury <- injury %>% mutate(DAYS_LOST_NEW = ifelse(DEGREE_INJURY == 'NO DYS AWY FRM WRK,NO RSTR ACT' | DEGREE_INJURY == 'DAYS RESTRICTED ACTIVITY ONLY', 0, DAYS_LOST)) %>% mutate(DAYS_RESTRICT_NEW = ifelse(DEGREE_INJURY == 'NO DYS AWY FRM WRK,NO RSTR ACT' | DEGREE_INJURY == 'DAYS AWAY FROM WORK ONLY', 0, DAYS_RESTRICT))
+```
+
+```{r}
+# change invalid value to NA and fill the NA
+injury <- mutate(injury, ACCIDENT_TIME = ifelse(ACCIDENT_TIME > 2400, NA, ACCIDENT_TIME)) %>% mutate(SHIFT_BEGIN_TIME= ifelse(SHIFT_BEGIN_TIME > 2400, NA, SHIFT_BEGIN_TIME))
+
+# change the time in a range of 1-24
+injury <- injury %>% mutate(ACCIDENT_TIME_NEW=case_when(
+  ACCIDENT_TIME < 100  ~  floor(injury$ACCIDENT_TIME/10),
+  ACCIDENT_TIME >= 100 ~ floor(injury$ACCIDENT_TIME/100))) %>% 
+  mutate(SHIFT_BEGIN_TIME_NEW=case_when(
+  SHIFT_BEGIN_TIME < 100  ~  floor(injury$SHIFT_BEGIN_TIME /10),
+  SHIFT_BEGIN_TIME >= 100 ~ floor(injury$SHIFT_BEGIN_TIME /100)))
+
+# fill the NA as the median based the ACCIDENT_TIME and SHIFT_BEGIN_TIME, from EDA process we know that those two values are higher related 
+injury <- injury %>%
+    group_by(SHIFT_BEGIN_TIME_NEW) %>%
+    mutate(Amedian = median(ACCIDENT_TIME_NEW, na.rm=TRUE))  %>% 
+    group_by(ACCIDENT_TIME_NEW) %>%
+    mutate(Smedian = median(SHIFT_BEGIN_TIME_NEW, na.rm=TRUE))
+
+injury <- injury %>% mutate(SHIFT_BEGIN_TIME_NEW = ifelse(is.na(SHIFT_BEGIN_TIME_NEW),Smedian, SHIFT_BEGIN_TIME_NEW)) %>%
+    mutate(ACCIDENT_TIME_NEW = ifelse(is.na(ACCIDENT_TIME_NEW),Amedian,ACCIDENT_TIME_NEW)) %>% 
+    mutate(DAY_NIGHT= ifelse(ACCIDENT_TIME_NEW >=6 & ACCIDENT_TIME_NEW <=15, "DAY", "NIGHT"))
+```
+
+```{r}
+# add a column as days return to work and change some numeric variables to factor 
+injury <- within(injury, {
+     ACCIDENT_DT      <- as.POSIXct(ACCIDENT_DT, format='%d/%m/%Y')
+     RETURN_TO_WORK_DT<- as.POSIXct(RETURN_TO_WORK_DT, format='%m/%d/%Y')
+     CAL_QTR          <- as.factor(CAL_QTR)
+     CAL_YR           <- as.factor(CAL_QTR)
+     FIPS_STATE_CD    <- as.factor(FIPS_STATE_CD)
+})
+
+injury$DAY_AWY <- difftime(injury$RETURN_TO_WORK_DT,injury$ACCIDENT_DT, units="days") %>% as.numeric()
+```
+
+```{r}
+# fill NA for experience variables by other experience variables
+injury <- injury %>% mutate(TOT_EXPER_NEW  = ifelse(is.na(TOT_EXPER),JOB_EXPER,TOT_EXPER))  %>%
+                     mutate(TOT_EXPER_NEW  = ifelse(is.na(TOT_EXPER),MINE_EXPER,TOT_EXPER)) %>%
+                     mutate(JOB_EXPER_NEW  = ifelse(is.na(JOB_EXPER),TOT_EXPER,JOB_EXPER))  %>%
+                     mutate(MINE_EXPER_NEW = ifelse(is.na(MINE_EXPER),TOT_EXPER,MINE_EXPER))
+```
+
+```{r}
+# still have some NAs, use vtreat to prepare the data
+ varlist <- setdiff(colnames(injury),"DEGREE_INJURY_CD")
+ treatment_plan <- design_missingness_treatment(injury, varlist = varlist)
+ training_prepared <- prepare(treatment_plan,injury)
+```
+
+```{r}
+# remove main df to free memory
+rm(main,injury)
+```
+
+## Part 1 - Classification
+
+### Select the target variable
+The response variable chosen for this project is the degree of injury of the accident, no injured or injured.
+
+I've focused on this target variable to help to classify whether the accidents will cause injury. If employee is injured then it will cause days lost from work/days restricted etc. In this case, the company can plan ahead and take countermeasures.The labels assigned to this variable are 'no' for not injured or 'yes' for workers is injured due to accident. The aim of this project is to use a number of feature variables to create a classification model to assess if an incident will involve extra attention or if countermeasures are needed due to injury.
+
+Create a target variable based on the the degree injury number. 0 and 6 indicate there that the employee had no injuries.
+```{r}
+training_prepared <-  training_prepared %>% 
+                      subset(DEGREE_INJURY_CD %in% c("0", "1","2","3","4","5","6"))  %>%
+                      mutate(DEGREE_INJURY_PRED = ifelse(DEGREE_INJURY_CD %in% c("0","6"), "no","yes"))%>%
+                      mutate(DEGREE_INJURY_PRED = as.factor(DEGREE_INJURY_PRED))
+
+table(training_prepared$DEGREE_INJURY_PRED)
+```
+
+The split between day lost and no day lost is not 1:1 balanced but are very close thus won't significantly affect the model performance, so addition methods like under-sampling or over-sampling is not needed.
+```{r}
+round(prop.table(table(training_prepared$DEGREE_INJURY_PRED)), 2)
+```
+
+Convert indicator variables to factor.
+```{r message=FALSE, warning=FALSE}
+indicator <- names(training_prepared)[grepl("isBAD",names(training_prepared))]
+for(d in indicator) {
+      training_prepared[[d]] <- as.factor(training_prepared[[d]])
+}
+```
+
+### Select feature variables
+Select input variables that are likely to be most useful to a model in order to predict the target variable, in this case, we want to select variables from the dataset that could help us to predict whether the incidents will cause day lost to the workers. The information gathered from EDA process and the data dictionary that was given are used to make an informed decision about the variable we could use. And this have almost done in the data cleaning step, which some variables were selected and kept in the previous step. However, we still need to filter some variables that created in previous step. 
+
+"DAYS_LOST","DAYS_RESTRICTED", "SCHEDULE_CHARGE" contain information about the degree of injury and, we'll get very good f1 score(0.988), recall(1), precision(0.977) for decision tree model. However, I don't thinks it's appropriate to include those variables in the model, it's more like telling the result rather than predict. 
+
+Variable OCCUPATION will also be excluded from here, reasons for this is it contains too many levels (more than 180 categories) and even though the training set contains approximate 80% of the data, there were still some categories that in the calibration/test set but not in training set, which makes it hard to build the model. There are ways to solve this problem such as orders the levels of the OCCUPATION by the number of occurrence of each level in one class. However, in this project we'll exclude the variable.
+```{r}
+duplicate_info <- names(training_prepared)[grepl("DAY",names(training_prepared))]
+class <- training_prepared[,-which(names(training_prepared) %in% c(duplicate_info,"Amedian", "Smedian","ACCIDENT_DT","RETURN_TO_WORK_DT", "SCHEDULE_CHARGE",'OCCUPATION' ))]
+```
+
+### Splitting
+The code below is adapted from the lecture slide. 90% of the data will be used for training and the rest of them will be used for training. Out of the 90% of the training set, 10% of them will be used for calibration.
+```{r}
+set.seed(12345678)
+rgroup <- runif(nrow(class)) < 0.9
+dTrainAll <- class[rgroup,]
+dTest <- class[!rgroup,]
+
+outcomes <- c('DEGREE_INJURY_PRED','DEGREE_INJURY_CD','DAY_AWY', 'DEGREE_INJURY')
+
+vars <- setdiff(colnames(dTrainAll), outcomes)
+catVars <- vars[sapply(dTrainAll[, vars], class) %in% c('factor', 'character')]
+numericVars <- vars[sapply(dTrainAll[, vars], class) %in% c('numeric', 'integer')] 
+
+useForCal <- rbinom(n=dim(dTrainAll)[1], size=1, prob=0.1) > 0 
+dCal <- subset(dTrainAll, useForCal)
+dTrain <- subset(dTrainAll, !useForCal)
+
+rm(list=c('dTrainAll'))
+```
+
+### Single Variable Model(SVM)
+#### Categorical
+Function for SVM predictions for categorical variables.
+```{r}
+pos <- "yes"
+mkPredC <- function(outCol, varCol, appCol) {
+  pPos <- sum(outCol == pos) / length(outCol)
+  naTab <- table(as.factor(outCol[is.na(varCol)]))
+  pPosWna <- (naTab/sum(naTab))[pos]
+  vTab <- table(as.factor(outCol), varCol)
+  pPosWv <- (vTab[pos, ] + 1.0e-3*pPos) / (colSums(vTab) + 1.0e-3) 
+  pred <- pPosWv[appCol]
+  pred[is.na(appCol)] <- pPosWna
+  pred[is.na(pred)] <- pPos
+  pred
+}
+```
+
+Data type has change to multi-type, need to change back to data.frame only.
+```{r}
+dTrain <- as.data.frame(dTrain)
+dCal <- as.data.frame(dCal)
+dTest <- as.data.frame(dTest)
+```
+
+```{r}
+outcome <- "DEGREE_INJURY_PRED"
+for(v in catVars) {
+  pi <- paste('pred',v,sep='')
+  dTrain[,pi] <- mkPredC(dTrain[,outcome], dTrain[,v], dTrain[,v])
+  dCal[,pi] <- mkPredC(dTrain[,outcome], dTrain[,v], dCal[,v])
+  dTest[,pi] <- mkPredC(dTrain[,outcome], dTrain[,v], dTest[,v])
+}
+```
+
+Evaluate SVM for categorical variables.
+```{r}
+calcAUC <- function(predcol,outcol) {
+  perf <- ROCR::performance(prediction(predcol,outcol==pos),'auc')
+  as.numeric(perf@y.values) 
+}
+```
+
+Dataframe that store AUC score.
+```{r}
+aucDf <- data.frame(modelname=character(), trainAUC=double(), calAUC=double())
+```
+
+Processing all categorical variables, print out the area under curve (AUC) only it is greater or equal to 0.5. 
+```{r}
+for(v in catVars) {
+  pi <- paste('pred', v, sep='')
+  aucTrain <- calcAUC(dTrain[,pi], dTrain[,outcome])
+  aucCal   <- calcAUC(dCal[,pi], dCal[,outcome]) 
+  if (aucTrain >= 0.5) {
+    aucDf[nrow(aucDf) + 1,] <- list(pi,aucTrain,aucCal)  
+    print(sprintf(
+      "%s: trainAUC: %4.3f; calibrationAUC: %4.3f",
+      pi, aucTrain, aucCal))
+  }
+}
+```
+
+From the output, we can see there are a few very impressing variables with high AUC such as injury body part, accident type and nature injury with AUC score over 0.8. Indicator variables have some reasonable AUC, approximately 0.65. 
+
+#### Filter out indicators.
+```{r}
+catVars <- setdiff(catVars,indicator)
+```
+
+#### Numeric 
+Function for SVM predictions for numeric variables.
+```{r}
+mkPredN <- function(outCol,varCol,appCol) {
+  cuts <- unique(as.numeric(quantile(varCol, probs=seq(0, 1, 0.1), na.rm=T)))
+  varC <- cut(varCol, cuts)
+  appC <- cut(appCol, cuts)
+  mkPredC(outCol, varC, appC)
+}
+```
+
+Processing all numeric variables, print out the area under curve (AUC) only it is greater or equal to 0.5. 
+```{r}
+for(v in numericVars) {
+  pi<-paste('pred',v,sep='')
+  dTrain[,pi] <- mkPredN(dTrain[,outcome], dTrain[,v], dTrain[,v])
+  dTest[,pi]  <- mkPredN(dTrain[,outcome], dTrain[,v], dTest[,v])
+  dCal[,pi]   <- mkPredN(dTrain[,outcome], dTrain[,v], dCal[,v])
+  aucTrain    <- calcAUC(dTrain[,pi],dTrain[,outcome])
+  aucCal      <- calcAUC(dCal[,pi],dCal[,outcome])
+  if(aucTrain>=0.5) {
+    aucDf[nrow(aucDf) + 1,] <- list(pi,aucTrain,aucCal)
+    print(sprintf(
+      "%s, trainAUC: %4.3f calibrationAUC: %4.3f",
+      pi,aucTrain,aucCal))
+  }
+}
+```
+
+The best single numeric variable model is the Total experience variabe with calibration AUC score of 0.665.
+
+#### Calculate loglikelihood for feature selection
+```{r}
+# define function that calculate log likelihood
+logLikelihood <- function(outCol, predCol, posl=pos) {
+  sum(ifelse(outCol==pos, log(predCol), log(1-predCol)))
+}
+```
+
+Log null
+```{r}
+baseRateCheck <- logLikelihood(dCal[,outcome], sum(dCal[,outcome]==pos)/length(dCal[,outcome]) )
+```
+
+Select categorical variables only if the deviance reduction is over 500. 
+```{r}
+selPredVars <- c()
+selVars <- c()
+minStep <- 500
+
+for(v in catVars) {
+  pi <- paste('pred',v,sep='')
+  devDrop <- 2*((logLikelihood(dCal[,outcome],dCal[,pi])
+                 - baseRateCheck))
+  if(devDrop>minStep) {
+    print(sprintf("%s, deviance reduction: %g",pi,devDrop))
+    selPredVars <- c(selPredVars,pi)
+    selVars <- c(selVars, v)
+  }
+}
+```
+
+Select numeric variables only if the deviance reduction is over 500. 
+```{r}
+for(v in numericVars) {
+    pi <- paste('pred', v, sep='')
+    devDrop <- 2*((logLikelihood(dCal[,outcome], dCal[,pi]) - baseRateCheck) - 1)
+    if(devDrop >= minStep) {
+        print(sprintf("%s, deviance reduction: %g", pi, devDrop))
+        selPredVars <- c(selPredVars,pi)
+        selVars     <- c(selVars, v)
+    }
+}
+```
+
+```{r}
+selVars
+```
+
+### Multivariate models
+
+Data frame that store the model and performance measure for models.
+```{r}
+modelMeasure <- data.frame(modelname=character(), precision=double(), recall = double(), f1 = double(), accuracy = double())
+
+aucAll <- data.frame(modelname=character(), FalsePositiveRate=double(), TruePositiveRate = double())
+```
+
+#### Model evaluation
+Functions that plot graphs 
+```{r}
+# plot ROC curve
+ plotROC <- function(pf,titleString="ROC plot") { 
+   ggplot() + 
+     geom_line(data=pf, aes(x=FalsePositiveRate, y=TruePositiveRate, group = modelname, colour=modelname)) +
+     labs(title = titleString) +
+     geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+     theme_bw()
+ }
+
+# distribution plot
+distribution <- function(prediction, calTrue,modelname="mn"){
+  ggplot(data.frame(predictions=prediction, calTrue = calTrue),
+          aes(x=predictions, color=calTrue, linetype=calTrue)) +
+          geom_density()  + 
+          labs(title = paste(modelname, "Distribution Plot "), 
+                             y = "Density", x = paste(modelname,"Prob")) +
+          theme_bw()
+}
+```
+
+Function that calculate performance.
+```{r}
+# calculate the performance measure
+# return the confusion matrix and the calculated value in a list
+performanceMeasures <- function(pred, true, model.name = "model",threshold) {
+  dev.norm <- -2 * logLikelihood(true, pred)/length(pred) 
+  cmat <- table(actual = true, predicted = (pred > threshold))
+  accuracy <- sum(diag(cmat)) / sum(cmat)
+  precision <- cmat[2, 2] / sum(cmat[, 2])
+  recall <- cmat[2, 2] / sum(cmat[2, ])
+  f1 <- 2 * precision * recall / (precision + recall)
+  list(cmat,data.frame(model = model.name, precision = precision,recall = recall, f1 = f1, accuracy = accuracy))
+}
+```
+
+```{r}
+tpr_fpr <- function(pred_value, true, mn){
+  predObj <- ROCR::prediction(pred_value, true)
+  perf    <- ROCR::performance(predObj, "tpr", "fpr")
+  data.frame(FalsePositiveRate=perf@x.values[[1]],
+                    TruePositiveRate=perf@y.values[[1]],modelname=mn)
+}
+```
+
+Function that print the graphs and table.
+```{r}
+# this function accept the model that built, 
+# the training set and the true value of the predicted variable,
+# test/calibration set and the true value from the test/cal set
+# threshold that will be used (default = 0.5)
+# modelname for the graphs that will be plotted
+performance <- function(model,dCal,cal_true,dTrain,train_true,predValue=TRUE,threshold=0.5,modelname){
+  
+  if (predValue){
+    pred_value <- predict(model, newdata = dCal)[,pos]
+    pred_train <- predict(model, newdata = dTrain)[,pos]
+  }else {
+    pred_value <- predict(model, newdata = dCal, type = "response")
+    pred_train <- predict(model, newdata = dTrain, type = "response")
+  }
+  
+  pf       <- tpr_fpr(pred_value, cal_true, mn=paste(modelname,"cal"))
+  pf_train <-  tpr_fpr(pred_train, train_true, mn=paste(modelname,"train"))
+  
+  aucAll <<- rbind(aucAll,pf)   # value for AUC curve 
+  
+  print(plotROC(rbind(pf,pf_train)))
+  
+  print(distribution(pred_value, as.factor(cal_true),modelname))
+  
+  pnull      <- mean(cal_true==pos)
+  callog     <- logLikelihood(cal_true, pred_value)
+  nulllog    <- logLikelihood(cal_true, pnull)
+  trainAUC   <- calcAUC(pred_train, train_true)
+  calAUC     <- calcAUC(pred_value, cal_true)
+  
+  aucDf[nrow(aucDf) + 1,] <<- list(modelname,trainAUC,calAUC)   # store AUC value
+  
+  modelm <- matrix(c(nulllog,callog,trainAUC,calAUC), byrow=TRUE, nrow = 1)
+  colnames(modelm) <- c("null_log", "cal_log", "trainAUC","calAUC")
+  print(modelm)
+  
+  trainperf_df <- performanceMeasures(train_true==pos, pred_train >= threshold, model.name="training",threshold)
+  testperf_df  <- performanceMeasures(cal_true==pos, pred_value >= threshold, model.name="calibration",threshold)
+  train_df     <- trainperf_df[[2]]
+  test_df      <- testperf_df[[2]]        # second element of the returned output from performanceMeasures
+  perftable    <- rbind(train_df,test_df) # combine the performance measure for both training and calibration set to a single df
+  print(knitr::kable(testperf_df[[1]]))   # confusion matrix based on the threshold
+  print(perftable)
+  df <- data.frame(modelname)
+  names(df) <- c("modelname")
+  alldf <- cbind(df,test_df[,c(2,3,4,5)])
+  modelMeasure <<- rbind(modelMeasure, alldf)    # store calibration performance measure in modelMeasure df for later use
+}
+```
+
+#### Decision Tree with all variables
+```{r}
+formula <- paste(outcome,' ~ ', paste(vars, collapse=" + "), sep='')
+decision_tree_all <- rpart(formula, data=dTrain)
+```
+
+```{r}
+performance(decision_tree_all,dCal,dCal[,outcome],dTrain,dTrain[,outcome],modelname="Decision Tree (all)")
+```
+
+This decision tree model that containing all variables selected including the indicator variables with a log likelihood of -7631.1 which is better than null model (-11762.61). The AUC score for training and calibration dataset doesn't vary a lot, the calibration AUC is 0.824 which is slightly better than train AUC, 0.822. Same for the precision, recall, fl and accuracy, those scores are very close between the training and calibration set. The ROC curve doesn't look very good (since the AUC is only 0.824) and we can see from the distribution plot that there is overlap between the positive(yes) and negative(no) for the probability that generated especially when x axis is around 0.3. Different threshold (0.5-0.9) were tested, but not much difference, so we'll just stick with 0.5 for this model. High accuracy is what we are aiming for, both false positive/false negative will need to some potential problems, for example cost for countermeasures and employees dissatisfaction. However, the accuracy for this model doesn't look very impressive and improvement is needed.
+
+#### Decision Tree without indicators
+```{r}
+formula <- paste(outcome,' ~ ', paste(c(catVars,numericVars), collapse=' + ', sep=''))
+decision_tree_wNind <- rpart(formula, data=dTrain)
+```
+
+```{r}
+performance(decision_tree_wNind,dCal,dCal[,outcome],dTrain,dTrain[,outcome],modelname="Decision Tree (no_ind)")
+```
+
+This model excluded all the indicator variables and there is no differences between the model above. AUC, log likelihood, precision, recall, f1 and accuracy, everything is the same suggesting the indicator variables don't affect the performance of the decision tree model. 
+
+#### Decision Tree with the selected variables
+```{r}
+formula <- paste(outcome,' ~ ', paste(selVars, collapse=' + '), sep='')
+decision_tree_sel <- rpart(formula, data=dTrain)
+```
+
+```{r}
+performance(decision_tree_sel,dCal,dCal[,outcome],dTrain,dTrain[,outcome], modelname="Decision Tree (sel)")
+```
+
+Surprisingly,the performance of decision tree with selected variables is exactly the same as the two models above. Again, this suggests that the numeric variables of the dataset which are not good predictors with no influences on the model.  
+
+#### Logistic Regression with all variables
+```{r message=FALSE, warning=FALSE}
+formula <- paste(outcome, paste(c(catVars,numericVars), collapse=" + "), sep=" ~ ")
+logr_all <- glm(formula=formula, data=dTrain, family=binomial(link="logit"))
+```
+
+```{r message=FALSE, warning=FALSE}
+performance(logr_all,dCal,dCal[,outcome],dTrain,dTrain[,outcome],predValue=FALSE, threshold= 0.57, modelname="LogisticR (all)")
+```
+
+This logistic regression model that containing all variables with a log likelihood of -6791.797 which is better than null model (-11762.61) and decision tree models (-7631.1). The AUC score for training and calibration dataset are 0.893, 0.891 respectively. Again, the AUC which is greater than decision tree models. The ROC curve looks better than the decision tree model as well and we can see from the distribution plot that there is more obvious cutoff between yes and no values and this is the threshold value that we picked for analysis. Also, the precision, recall, f1 and accuracy scores for calibration set which are slightly better than decision tree models.
+
+```{r message=FALSE, warning=FALSE}
+formula <- paste(outcome, paste(selVars, collapse=" + "), sep=" ~ ")
+logr_sel <- glm(formula=formula, data=dTrain, family=binomial(link="logit"))
+```
+
+```{r message=FALSE, warning=FALSE}
+performance(logr_sel,dCal,dCal[,outcome],dTrain,dTrain[,outcome],predValue=FALSE,threshold= 0.57, modelname="LogisticR (sel)")
+```
+
+Both the likelihood and AUC are slightly worse than the logistic regression with all variables, there is not much differences in other performance measures this further suggest the numeric variables that not not predictors. 
+
+#### XGBoost
+```{r message=FALSE, warning=FALSE}
+# adapted from sample given
+# minimum frequency a categorical level must have to be converted to an indicator column is 2.5%
+# don't print progress
+tplan <- vtreat::designTreatmentsZ(dTrain, vars, 
+                                   minFraction= 0.025,
+                                   verbose=FALSE)
+sf <- tplan$scoreFrame
+newvars <- sf$varName[sf$code %in% c("lev", "clean", "isBAD")]  #select variables
+
+trainVtreat <- as.matrix(vtreat::prepare(tplan, dTrain, varRestriction = newvars))
+calVtreat <- as.matrix(vtreat::prepare(tplan, dCal, varRestriction = newvars))
+testVtreat <- as.matrix(vtreat::prepare(tplan, dTest, varRestriction = newvars))
+```
+
+```{r results='hide'}
+cv <- xgb.cv(trainVtreat, 
+             label = dTrain[,outcome]==pos,
+             params=list(objective="binary:logistic"),
+             nfold=5,
+             nrounds=100,
+             metrics="logloss")
+
+evalframe <- as.data.frame(cv$evaluation_log)
+NROUNDS <- which.min(evalframe$test_logloss_mean)
+```
+
+```{r message=FALSE, warning=FALSE}
+xgboost_model <- xgboost(data=trainVtreat, 
+                 label=dTrain[,outcome]==pos,
+                 params=list(objective="binary:logistic"),
+                 nrounds=NROUNDS,
+                 verbose=FALSE)
+```
+
+```{r}
+performance(xgboost_model,calVtreat,dCal[,outcome], trainVtreat,dTrain[,outcome], predValue=FALSE, threshold=0.54,modelname="xgboost")
+```
+
+The performance of this model is very similar to logistic regression mode. The precision, recall, f1 and accuracy score are 0.8795,0.8338, 0.8560, 0.8259, respectively.
+
+#### Put all models together 
+```{r}
+df <- melt(modelMeasure, id.vars = "modelname" ,variable.name = 'measure')
+
+ggplot(df, aes(measure,value, group=modelname,colour=modelname)) + 
+  geom_point(size=1)+
+  geom_line(aes(linetype=modelname)) +
+  labs(title = "Performance measures")
+```
+
+```{r}
+plotROC(aucAll)
+```
+
+```{r}
+kable(head(aucDf[order(aucDf$calAUC,decreasing = T),], 10))
+```
+
+Based on the performance measures and AUC, we can see xgboost and logistic regression model have similar performance. There are some single variable models that perform quiet well eg., nature injury which outperformed the multivariate model- decision tree.We'll pick the model with highest accuracy which is logistic regression with all variables to evaluate the model on the test set.
+
+### Evaluate logistic model on the test set
+```{r warning=FALSE, message=FALSE}
+performance(logr_all,dTest,dTest[,outcome],dTrain,dTrain[,outcome],predValue=FALSE,threshold= 0.57, modelname="LogR")
+```
+
+Note* label cal/calTrue/calAUC are actually mean test set.
+
+The log likelihood and AUC which is slightly worse than the calibration set.There is not much differences in performance measure between the calibration set and test set for logr_all model.
+
+## Part 2 Clustering
+Hierarchical clustering will be used here as it is a more exploratory type. Unfortunately, the function (dist/daisy) for agglomerative clustering needs quadratic memory thus it is more suitable for small dataset analysis, and the 200,000 observations dataset is too big for the laptop's memory (which will crash). We can either use a sample of data or modify/transform the data frame.
+
+Not all variables are included the clustering and this selection is based few criteria:
+1) Categorical variables with too many levels (eg.,mine ID).
+2) Variables with too much NAs.
+3) Variables that have only one possible value.
+4) Variables which are a duplicate of another variable (eg., degree injury contains information for days lost column).
+
+There are lots of categorical variables in the dataset and discarding all the categorical variables is not a good idea, there are two ways that we can deal with categorical variables: 
+1) Converting that variable in dummy variable
+2) Treating it as a ratio/frequency scaled variable
+
+Since the dataset is already 'over-sized' for agglomerative clustering functions, creating a lots of dummy variables (especially if categorical variables have too many levels) isn't really an option here, so we'll transform the data frame instead. 
+
+```{r}
+cluster <- training_prepared %>% subset(select = c("INJ_BODY_PART", "TOT_EXPER_NEW", "DAY_NIGHT","NO_INJURIES",
+ "CLASSIFICATION","INJURY_SOURCE","ACCIDENT_TYPE","SUBUNIT","DEGREE_INJURY","ACTIVITY")) %>% filter(!(INJ_BODY_PART %in% c('UNCLASSIFIED', 'NO VALUE FOUND')))
+```
+
+```{r}
+# convert categorical to factor, some function only accept factor if the dataframe contain categorical variables
+# daisy() from library-cluster
+for (c in names(cluster)) {
+  if(class(cluster[[c]]) == "character") {
+    cluster[[c]] <- factor(cluster[[c]])
+    }
+}
+```
+
+```{r}
+# discretising numeric variables
+cluster <- cluster %>% mutate(TOT_EXPER_NEW = cut(TOT_EXPER_NEW, breaks=c(0, 5, 10, Inf), include.lowest = TRUE, labels = c('0-5', '6-10', '>10')))  %>%  mutate(NO_INJURIES = cut(NO_INJURIES, breaks=c(-1, 1, Inf), labels = c('no_inj', 'inj')))
+```
+
+```{r}
+# count the number of each category of selected variables according body parts. 
+cal_freq <- function(variable){
+  form <- as.formula(paste('INJ_BODY_PART', variable, sep=' ~ ')) 
+  # reshape the df
+  freq_df <- dcast(data = cluster, formula = form, fun.aggregate = length, value.var = variable)
+  row.names(freq_df) <- freq_df$INJ_BODY_PART
+  # freq_df <-lapply( a[  , -1], function(x){ x/nrow(training_prepared)}) # calculate percentage 
+  freq_df <- freq_df[, 2:length(freq_df)]
+}
+```
+
+```{r}
+# trans_cluster is a list that contain 9 data frame (9 variables selected)
+trans_cluster <- lapply(names(cluster)[-1], cal_freq)
+names(trans_cluster) <- c(names(cluster)[-1])
+```
+
+##### Generate dissimilarity matrix
+In this project, we are not interested in the absolute magnitude of body parts affected, thus in this case we'll not use distances measures such as Manhattan and Euclidean. We are more interested about the overall shape of the response which is the similarly of affected body parts according to other variables. In this case, we'll use correlation distance.
+```{r} 
+# convert list of data frame to numeric matrix 
+# calculate the distance matrix
+library(amap)
+correlation_dis <- function(trans_cluster) {
+    matrix <- as.matrix(trans_cluster)
+    Dist(matrix, method = "correlation")
+}
+```
+
+```{r}
+# no techniques were used for the chosen of weight for each variable, it more based on the visualization results from project 1 and different weighting was tested to achieve best clustering result
+weight <- c(0.05, 0.05, 0.05, 0.1, 0.2, 0.1, 0,1, 0.15, 0.2)
+disMaxtrix <- lapply(trans_cluster, correlation_dis)
+d <- disMaxtrix[[1]]* weight[1]
+for(i in 2:length(trans_cluster)){
+    d <- d +  disMaxtrix[[i]]* weight[i]
+}
+```
+
+##### Linkage method and Dendrogram visualization
+Linkage method 'ward.D2' is used because it gave me most clear-cut, tight-and-isolated clusters. 
+```{r}
+library(ggdendro)
+pfit <- hclust(d, method="ward.D2")
+dend <- dendro_data(pfit, type="rectangle")
+```
+
+```{r}
+# to include labels use ggdendrogram(pfit, rotate = TRUE,theme_dendro = FALSE) 
+# labels are not included here because there are to many levels in injury body part variable and it's a bit mess if we include them in the diagram.
+ggplot() + 
+  geom_segment(data=segment(dend), aes(x=x, y=y, xend=xend, yend=yend)) + 
+  theme_dendro()
+```
+
+Print out members in each cluster.
+```{r}
+# based on the deprogram, the we'll choose 3 as our desired number of groups
+groups <- cutree(pfit, k=3)
+print_clusters <- function(groups) { 
+  Ngroups <- max(groups)
+  for (i in 1:Ngroups) {
+    cat(paste("Cluster", i))
+    cat('\n')
+    cat('-------------------\n')
+    cat(paste(names(groups[groups == i]), collapse = "\t"))
+    #print(unique(cluster[groups == i,] %>% pull("INJ_BODY_PART")))
+    cat('\n\n')
+  }
+}
+print_clusters(groups)
+```
+
+##### Visualising Clusters
+```{r}
+mxd <- as.matrix(d)
+princ <- prcomp(mxd)
+nComp <- 2
+project2D <- as.data.frame(predict(princ, newdata=mxd)[,1:nComp])
+hclust.project2D <- cbind(project2D, cluster=as.factor(groups), InjBody=names(groups))
+head(hclust.project2D)
+```
+```{r message=FALSE, warning=FALSE}
+library('grDevices')
+find_convex_hull <- function(proj2Ddf, groups) {
+  do.call(rbind,
+          lapply(unique(groups),
+            FUN = function(c) {
+              f <- subset(proj2Ddf, cluster==c);
+              f[chull(f),]
+            }
+          )
+  )
+}
+hclust.hull <- find_convex_hull(hclust.project2D, groups)
+```
+
+```{r}
+ggplot(hclust.project2D, aes(x=PC1, y=PC2)) +
+    geom_point(aes(shape=cluster, color=cluster)) +
+    geom_text(aes(label=InjBody, color=cluster), hjust=0, vjust=1, size=2) +
+    geom_polygon(data=hclust.hull, aes(group=cluster, fill=as.factor(cluster)),alpha=0.4, linetype=0)
+```
+
+##### Cluster stability
+```{r results='hide'}
+library(fpc)
+kbest.p <- 3
+cboot.hclust <- clusterboot(d, clustermethod=hclustCBI,
+                method="ward.D2", k=kbest.p)
+```
+
+```{r}
+summary(cboot.hclust$result)
+```
+
+```{r}
+1 - cboot.hclust$bootbrd/100
+```
+
+All three clusters are very stable.
+
+```{r}
+groups.cboot <- cboot.hclust$result$partition
+```
+
+##### Calinski-Harabasz index
+Use WSS and BSS value to select the optimal numebr of clusters 
+```{r}
+sqr_euDist <- function(x, y) { 
+  sum((x - y)^2)
+}
+```
+
+```{r}
+wss <- function(clustermat) {
+  c0 <- colMeans(clustermat)
+  sum(apply(clustermat, 1, FUN=function(row) {sqr_euDist(row, c0)})) 
+}
+```
+
+```{r}
+wss_total <- function(disMatrix, labels) {
+  wss.sum <- 0
+  k <- length(unique(labels)) 
+  for (i in 1:k){
+    wss.sum <- wss.sum + wss(subset(disMatrix, labels == i))
+  }
+  wss.sum
+}
+```
+
+```{r}
+tss <- function(disMatrix) {
+   wss(disMatrix)
+}
+```
+
+```{r}
+CH_index <- function(disMatrix, kmax, method="kmeans") {
+  if (!(method %in% c("kmeans", "hclust")))
+    stop("method must be one of c('kmeans', 'hclust')")
+  
+  npts <- nrow(disMatrix)
+  wss.value <- numeric(kmax) 
+  wss.value[1] <- wss(disMatrix)
+  
+  if (method == "kmeans") { 
+    for (k in 2:kmax) {
+      clustering <- kmeans(disMatrix, k, nstart=10, iter.max=100) 
+      wss.value[k] <- clustering$tot.withinss
+    }
+  } else {
+  d <- Dist(disMatrix, method="correlation") 
+  pfit <- hclust(d, method="ward.D2")
+  for (k in 2:kmax) {
+        labels <- cutree(pfit, k=k)
+        wss.value[k] <- wss_total(disMatrix, labels)
+      }
+  }
+  
+  bss.value <- tss(disMatrix) - wss.value
+  B <- bss.value / (0:(kmax-1))
+  W <- wss.value / (npts - 1:kmax)
+  data.frame(k = 1:kmax, CH_index = B/W, WSS = wss.value) 
+}
+```
+
+```{r message=FALSE, warning=FALSE}
+k=10
+crit.df <- CH_index(mxd, k, method="hclust")
+
+ch_wss <- data.frame(k=1:k, ch=scale(crit.df$CH_index), wss=scale(crit.df$WSS))
+
+ch_wss <- melt(ch_wss, id.vars=c("k"),
+                  variable.name="measure",
+                  value.name="score")
+
+ggplot(ch_wss, aes(x=k, y=score, color=measure)) +
+          geom_point(aes(shape=measure)) +
+          geom_line(aes(linetype=measure)) +
+          scale_x_continuous(breaks=1:k, labels=1:k)
+```
+
+Based on total within sum of squares (WSS) (average squared distance of each point in the cluster from the cluster’s centroid, and we want this number to be low so each cluster is tighter/denser) and ch (BSS-measures how close the points in a cluster are to each other and we this number to be high so want high isolated clusters) on the graph,I'd say the optimal cluster number is 5 and there is a clear elbow shape in the wss curve.
+
+### K-means
+Unlike hierarchical clustering that build hierarchy of clusters without having fixed number of cluster, k-means using a pre-specified number of clusters. It groups a collection of data points based certain similarities using centroids (like the centre of cluster).
+```{r}
+# number of centroids
+kbest.p <- 5  # from above graph
+kmClusters <- kmeans(mxd, kbest.p, nstart=100, iter.max=100)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(fpc)
+kmClustering.ch  <- kmeansruns(mxd, krange=1:15, criterion="ch")
+kmClustering.asw <- kmeansruns(mxd, krange=1:15, criterion="asw")
+kmClustering.ch$bestk
+kmClustering.asw$bestk
+```
+
+```{r message=FALSE, warning=FALSE}
+library(gridExtra)
+
+kmCritframe <- data.frame(k=1:15, ch=kmClustering.ch$crit,
+                          asw=kmClustering.asw$crit)
+
+fig1 <- ggplot(kmCritframe, aes(x=k, y=ch)) +
+  geom_point() + geom_line(colour="red") +
+  scale_x_continuous(breaks=1:15, labels=1:15) +
+  labs(y="CH index") + theme(text=element_text(size=15))
+
+fig2 <- ggplot(kmCritframe, aes(x=k, y=asw)) +
+  geom_point() + geom_line(colour="blue") +
+  scale_x_continuous(breaks=1:15, labels=1:15) +
+  labs(y="ASW") + theme(text=element_text(size=15))
+
+grid.arrange(fig1, fig2, nrow=1)
+```
+
+The two evaluation criteria give two different results. The Calinski-Harabasz Index (ch) suggests 3 is the optimal number of clusters which is what we picked for for hierarchical clustering while the average silhouette width (asw) suggests 2 clusters is the optimal number.
+
+
+
+
+
+
+
+
+
+
