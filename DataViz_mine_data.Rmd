@@ -29,7 +29,7 @@ library(ggbeeswarm)
 ```
 ### Load the Data
 ```{r LoadData, message=FALSE, warning=FALSE}
-setwd("~/Downloads/CITS4009")
+setwd("~/Downloads")
 main <- read.csv("us_data_2000.csv")
 ```
 ### Brief Overview of the Data
