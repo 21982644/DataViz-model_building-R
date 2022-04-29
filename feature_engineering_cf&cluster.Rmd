@@ -1,12 +1,11 @@
 ---
-title: "CITS4009-Project 2"
+title: "model building"
 output: 
     html_document
 ---
-#### Xiaoyu Yin (21982644)
 
 ## Introduction
-The dataset used for this project is pretty much the same as for the dataset used for project 1 (EDA) except this dataset has more observations. This dataset contains collected information on the mining injuries at U.S from 2000 to 2015 with 57 features and over 200,000 observations.
+The dataset used for this project is pretty much the same as for the dataset used EDA except this dataset has more observations. This dataset contains collected information on the mining injuries at U.S from 2000 to 2015 with 57 features and over 200,000 observations.
 
 ### Load Libraies
 ```{r message=FALSE, warning=FALSE}
